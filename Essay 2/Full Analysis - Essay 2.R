@@ -70,10 +70,10 @@ data[,"Trading_Volume"] <- c(stl(ts(data=log(data[,"Trading_Volume"]), start = 1
 data[,"Inflow_Volume"] <- c(stl(ts(data=log(data[,"Inflow_Volume"]), start = 1, frequency = 7), s.window = "periodic", t.window=1500, robust=TRUE)$time.series[,3])
 
 ### ADF tests
-summary(ur.df(data[,"ETH_Price"], type="trend", selectlags = "AIC", lags = 28))
-summary(ur.df(na.omit(data[,"ETH_Returns"]), type="trend", selectlags = "AIC", lags = 28))
-summary(ur.df(data[,"Trading_Volume"], type="no", selectlags = "AIC", lags = 28))
-summary(ur.df(data[,"Inflow_Volume"], type="no", selectlags = "AIC", lags = 28))
+summary(ur.df(data[,"ETH_Price"], type="drift", selectlags = "AIC", lags = 28))
+summary(ur.df(na.omit(data[,"ETH_Returns"]), type="drift", selectlags = "AIC", lags = 28))
+summary(ur.df(data[,"Trading_Volume"], type="drift", selectlags = "AIC", lags = 28))
+summary(ur.df(data[,"Inflow_Volume"], type="drift", selectlags = "AIC", lags = 28))
 
 # GARCH
 garch.spec <- ugarchspec(
