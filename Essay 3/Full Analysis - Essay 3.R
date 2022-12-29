@@ -120,7 +120,7 @@ ADF("BITSTAMP", data=Prices)
 ADF("HITBTC", data=Prices)
 ADF("COINBASE", data=Prices)
 ADF("Next", data=Prices)
-
+ 
 # Continous returns
 ADF_diff("BITFINEX", data=Prices)
 ADF_diff("BITSTAMP", data=Prices)
@@ -159,32 +159,32 @@ datadf <- function(var1, var2, data){
 data1 <- datadf("BITFINEX", "BITSTAMP", Prices)
 lags_coint_bi("BITFINEX", "BITSTAMP", data1)
 coint_bi("BITFINEX", "BITSTAMP", data1)
-TVECM_cyot.exo(data1[,c("BITFINEX", "BITSTAMP")], lag=10, nthresh=1, thresh=data1[,c("Futures_Start")], const = "TVECM", thresh1=1, regimespecific = "ECT") # BIC=5
+TD_VECM(data1[,c("BITFINEX", "BITSTAMP")], lag=10, thresh=data1[,c("Futures_Start")], const = "TVECM", thresh1=1, regimespecific = "ECT")
 
 data2 <- datadf("BITFINEX", "HITBTC", Prices)
 lags_coint_bi("BITFINEX", "HITBTC", data2)
 coint_bi("BITFINEX", "HITBTC", data2)
-TVECM_cyot.exo(data2[,c("BITFINEX", "HITBTC")], lag=4, nthresh=1, thresh=data2[,c("Futures_Start")], const = "TVECM", thresh1=1, regimespecific = "ECT") # BIC=2
+TD_VECM(data2[,c("BITFINEX", "HITBTC")], lag=4, thresh=data2[,c("Futures_Start")], const = "TVECM", thresh1=1, regimespecific = "ECT")
 
 data3 <- datadf("BITFINEX", "COINBASE", Prices)
 lags_coint_bi("BITFINEX", "COINBASE", data3)
 coint_bi("BITFINEX", "COINBASE", data3)
-TVECM_cyot.exo(data3[,c("BITFINEX", "COINBASE")], lag=2, nthresh=1, thresh=data3[,c("Futures_Start")], const = "TVECM", thresh1=1, regimespecific = "ECT") # BIC=2
+TD_VECM(data3[,c("BITFINEX", "COINBASE")], lag=2, thresh=data3[,c("Futures_Start")], const = "TVECM", thresh1=1, regimespecific = "ECT")
 
 data4 <- datadf("BITSTAMP", "COINBASE", Prices)
 lags_coint_bi("BITSTAMP", "COINBASE", data4)
 coint_bi("BITSTAMP", "COINBASE", data4)
-TVECM_cyot.exo(data4[,c("BITSTAMP", "COINBASE")], lag=5, nthresh=1, thresh=data4[,c("Futures_Start")], const = "TVECM", thresh1=1, regimespecific = "ECT") # BIC=2
+TD_VECM(data4[,c("BITSTAMP", "COINBASE")], lag=5, thresh=data4[,c("Futures_Start")], const = "TVECM", thresh1=1, regimespecific = "ECT")
 
 data5 <- datadf("BITSTAMP", "HITBTC", Prices)
 lags_coint_bi("BITSTAMP", "HITBTC", data5)
 coint_bi("BITSTAMP", "HITBTC", data5)
-TVECM_cyot.exo(data5[,c("BITSTAMP", "HITBTC")], lag=4, nthresh=1, thresh=data5[,c("Futures_Start")], const = "TVECM", thresh1=1, regimespecific = "ECT") # BIC=2
+TD_VECM(data5[,c("BITSTAMP", "HITBTC")], lag=4, thresh=data5[,c("Futures_Start")], const = "TVECM", thresh1=1, regimespecific = "ECT")
 
 data6 <- datadf("COINBASE", "HITBTC", Prices)
 lags_coint_bi("COINBASE", "HITBTC", data6)
 coint_bi("COINBASE", "HITBTC", data6)
-TVECM_cyot.exo(data6[,c("COINBASE", "HITBTC")], lag=4, nthresh=1, thresh=data6[,c("Futures_Start")], const = "TVECM", thresh1=1, regimespecific = "ECT") # BIC=2
+TD_VECM(data6[,c("COINBASE", "HITBTC")], lag=4, thresh=data6[,c("Futures_Start")], const = "TVECM", thresh1=1, regimespecific = "ECT")
 
 
 #### Spot-futures analysis
