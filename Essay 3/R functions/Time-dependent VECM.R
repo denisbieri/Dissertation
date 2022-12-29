@@ -1,4 +1,4 @@
-TD_VECM<-function(data, thresh, thresh1, lag=1, trim=0.15, regimespecific=c("All","ECT"), const=c("coint", "TVECM", "none"), plot=TRUE, trace=FALSE){
+TD_VECM<-function(data, thresh, thresh1, lag=1, trim=0.15, regimespecific=c("All","ECT"), const=c("coint", "TVECM", "none")){
   regimespecific<-match.arg(regimespecific)
   const<-match.arg(const)
   p<-lag
