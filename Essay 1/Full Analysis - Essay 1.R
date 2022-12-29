@@ -42,18 +42,18 @@ ggplot() +
 #### Empirical results
 #### ADF test
 # Log prices
-summary(ur.df(logWTIInv[,"Spot"], selectlags = "AIC", type="trend", lags=10))
-summary(ur.df(logWTIInv[,"X3.months"], selectlags = "AIC", type="trend", lags=10))
-summary(ur.df(logWTIInv[,"X6.months"], selectlags = "AIC", type="trend", lags=10))
-summary(ur.df(logWTIInv[,"X9.months"], selectlags = "AIC", type="trend", lags=10))
-summary(ur.df(logWTIInv[,"X1.year"], selectlags = "AIC", type="trend", lags=10))
+summary(ur.df(logWTIInv[,"Spot"], selectlags = "AIC", type="drift", lags=10))
+summary(ur.df(logWTIInv[,"X3.months"], selectlags = "AIC", type="drift", lags=10))
+summary(ur.df(logWTIInv[,"X6.months"], selectlags = "AIC", type="drift", lags=10))
+summary(ur.df(logWTIInv[,"X9.months"], selectlags = "AIC", type="drift", lags=10))
+summary(ur.df(logWTIInv[,"X1.year"], selectlags = "AIC", type="drift", lags=10))
 
 # Continous returns
-summary(ur.df(diff(logWTIInv[,"Spot"]), selectlags = "AIC", type="trend", lags=10))
-summary(ur.df(diff(logWTIInv[,"X3.months"]), selectlags = "AIC", type="trend", lags=10))
-summary(ur.df(diff(logWTIInv[,"X6.months"]), selectlags = "AIC", type="trend", lags=10))
-summary(ur.df(diff(logWTIInv[,"X9.months"]), selectlags = "AIC", type="trend", lags=10))
-summary(ur.df(diff(logWTIInv[,"X1.year"]), selectlags = "AIC", type="trend", lags=10))
+summary(ur.df(diff(logWTIInv[,"Spot"]), selectlags = "AIC", type="drift", lags=10))
+summary(ur.df(diff(logWTIInv[,"X3.months"]), selectlags = "AIC", type="drift", lags=10))
+summary(ur.df(diff(logWTIInv[,"X6.months"]), selectlags = "AIC", type="drift", lags=10))
+summary(ur.df(diff(logWTIInv[,"X9.months"]), selectlags = "AIC", type="drift", lags=10))
+summary(ur.df(diff(logWTIInv[,"X1.year"]), selectlags = "AIC", type="drift", lags=10))
 
 
 #### Johansen (trace) test for linear cointegration, MacKinnon (1999) critical values via http://qed.econ.queensu.ca/pub/faculty/mackinnon/johtest/
