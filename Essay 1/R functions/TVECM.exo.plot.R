@@ -137,34 +137,10 @@ TVECM.exo.plot<-function(data, thresh, nthresh=1, thresh1, thresh2, lag=1, trim=
       regimes[i]<-3
     }
   }
-  #ECT_Thresh_Regimes<-cbind(Zbest,thresh, regimes)
-  #colnames(ECT_Thresh_Regimes)<-c("ECTlow", "ECTmiddle", "ECThigh", "Thresh", "Regime")
-  #data.frame(ECT_Thresh_Regimes[order(ECT_Thresh_Regimes[,4]),])
-  #print(betaLT)
-  #print(cointconst)
-  
   ECTbest_Thresh_Regimes<-cbind(Z_temp,thresh, regimes)
   colnames(ECTbest_Thresh_Regimes)<-c("ECTbest", "Thresh", "Regime")
   ECTbest_Thresh_Regimes
   data.frame(ECTbest_Thresh_Regimes[order(ECTbest_Thresh_Regimes[,2]),])
   data.frame(ECTbest_Thresh_Regimes)
-  #plot(asfd$Thresh,asfd$ECTbest)
 }
-
-
-
-# asdf<-TVECM_cyot.exo.plot(logWTIInv[1:1304,c(4,1,10)], nthresh=2, thresh1=292930, thresh2=325209, lag=1, regimespecific = "All")
-# plot(asdf$Thresh, asdf$ECTbest,xlab="Threshold value",ylab="ECT", col = ifelse(asdf$Thresh <= 292930,'red',ifelse(asdf$Thresh > 325209,'blue','green')), pch = 1 )
-
-#for(i in 1:nrow(asdf)){
-#  if(asdf[i,3]==1){
-#    asdf[i,1]<-asdf[i,1]*0.114391
-#  }
-#  if(asdf[i,3]==2){
-#    asdf[i,1]<-asdf[i,1]*0.20113
-#  }
-#  if(asdf[i,3]==3){
-#    asdf[i,1]<-asdf[i,1]*0.073403
-#  }
-#}
 

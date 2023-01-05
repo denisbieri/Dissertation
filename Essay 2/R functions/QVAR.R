@@ -78,10 +78,6 @@
     datamat <- as.data.frame(rhs)
     colnames(datamat) <- colnames(rhs)
     col_names <- colnames(y)
-    # assign("var1_original" , y[,1],envir=.GlobalEnv)
-    # assign("var2_original" , y[,2],envir=.GlobalEnv)
-    # assign(col_names[1] , y[,1],envir=.GlobalEnv)
-    # assign(col_names[2] , y[,2],envir=.GlobalEnv)
     equation <- list()
     rhs <- rhs[,-ncol(rhs)]
     for (i in 1:K) {
@@ -91,8 +87,6 @@
         attr(equation[[colnames(yend)[i]]]$terms, "intercept") <- 1
       }
     }
-    # assign(col_names[1] , var1_original,envir=.GlobalEnv)
-    # assign(col_names[2] , var2_original,envir=.GlobalEnv)
     call <- match.call()
     if("season" %in% names(call)) call$season <- eval(season)
     result <- list(varresult = equation, datamat = data.frame(cbind(yend,
