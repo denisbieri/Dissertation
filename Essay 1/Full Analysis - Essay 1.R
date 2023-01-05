@@ -75,22 +75,18 @@ summary(ca.jo(logWTIInv[,c(1,5)], type="trace", ecdet="const",K=optlag[4,2]+1))
 #### TVECM testing and estimation (lags by BIC)
 # 3months ~ Spot
 T1<-TVECM.XHStest.exo(logWTIInv[,c(2,1,6)],lag=optlag[1,2], nboot=300, intercept=TRUE, trim=0.15, ngridthresh=2000, type="3Reg")
-TVECM_cyot.exo(logWTIInv[,c(2,1,6)], nthresh=2, thresh1=292930, thresh2=337928, lag=1)
 TVECM.exo(logWTIInv[,c(2,1,6)], nthresh=2, thresh1=292930, thresh2=337928, lag=1)
 
 # 6months ~ Spot
 T2<-TVECM.XHStest.exo(logWTIInv[,c(3,1,6)],lag=optlag[2,2], nboot=300, intercept=TRUE, trim=0.15, ngridthresh=2000, type="3Reg")
-TVECM_cyot.exo(logWTIInv[,c(3,1,6)], nthresh=2, thresh1=292930, thresh2=337680, lag=1)
 TVECM.exo(logWTIInv[,c(3,1,6)], nthresh=2, thresh1=292930, thresh2=337680, lag=1)
 
 # 9months ~ Spot
 T3<-TVECM.XHStest.exo(logWTIInv[,c(4,1,6)],lag=optlag[3,2], nboot=300, intercept=TRUE, trim=0.15, ngridthresh=2000, type="3Reg")
-TVECM_cyot.exo(logWTIInv[,c(4,1,6)], nthresh=2, thresh1=292930, thresh2=338068, lag=1)
 TVECM.exo(logWTIInv[,c(4,1,6)], nthresh=2, thresh1=292930, thresh2=338068, lag=1)
 
 # 1year ~ Spot
 T4<-TVECM.XHStest.exo(logWTIInv[,c(5,1,6)],lag=optlag[4,2], nboot=300, intercept=TRUE, trim=0.15, ngridthresh=2000, type="3Reg")
-TVECM_cyot.exo(logWTIInv[,c(5,1,6)], nthresh=2, thresh1=288674, thresh2=327552, lag=1)
 TVECM.exo(logWTIInv[,c(5,1,6)], nthresh=2, thresh1=288674, thresh2=327552, lag=1)
 
 
