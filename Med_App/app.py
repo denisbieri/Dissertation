@@ -237,7 +237,10 @@ def ensure_initial_schedule_history() -> None:
                 continue
 
             prescription_issue_date = row["prescription_issue_date"]
-            cycle_start_date = row["cycle_start_date"] or prescription_issue_date
+            if (row["schedule_mode"] or "weekly") == "cycle":
+                cycle_start_date = row["cycle_start_date"] or prescription_issue_date
+            else:
+                cycle_start_date = None
             now_iso = datetime.now().isoformat(timespec="seconds")
 
             conn.execute(
@@ -277,25 +280,40 @@ def get_medication(medication_id: int) -> sqlite3.Row | None:
 
 
 def _normalized_medication_payload(data: dict) -> dict:
+    schedule_mode = data["schedule_mode"]
+    prescription_issue_date = data["prescription_issue_date"]
+    raw_cycle_start_date = data["cycle_start_date"] or None
+
+    if schedule_mode == "cycle":
+        cycle_start_date = raw_cycle_start_date or prescription_issue_date
+    else:
+        cycle_start_date = None
+
     return {
         "person_name": data["person_name"].strip(),
         "birth_date": data["birth_date"],
         "medication_name": data["medication_name"].strip(),
-        "prescription_issue_date": data["prescription_issue_date"],
+        "prescription_issue_date": prescription_issue_date,
         "validity_months": int(data["validity_months"]),
         "pharmacy_reserved_packs": int(data["pharmacy_reserved_packs"]),
         "initial_tablets": round(float(data["initial_tablets"]), 2),
         "tablets_per_day": round(float(data["tablets_per_day"]), 2),
         "intake_weekdays": sorted(int(x) for x in data["intake_weekdays"]),
-        "schedule_mode": data["schedule_mode"],
+        "schedule_mode": schedule_mode,
         "cycle_take_days": int(data["cycle_take_days"]),
         "cycle_pause_days": int(data["cycle_pause_days"]),
-        "cycle_start_date": data["cycle_start_date"] or None,
+        "cycle_start_date": cycle_start_date,
         "notes": data["notes"].strip(),
     }
 
 
 def _row_as_normalized_payload(row: sqlite3.Row) -> dict:
+    schedule_mode = row["schedule_mode"] or "weekly"
+    if schedule_mode == "cycle":
+        cycle_start_date = row["cycle_start_date"] or row["prescription_issue_date"]
+    else:
+        cycle_start_date = None
+
     return {
         "person_name": (row["person_name"] or "").strip(),
         "birth_date": row["birth_date"],
@@ -306,10 +324,10 @@ def _row_as_normalized_payload(row: sqlite3.Row) -> dict:
         "initial_tablets": round(float(row["initial_tablets"] or 0), 2),
         "tablets_per_day": round(float(row["tablets_per_day"] or 0), 2),
         "intake_weekdays": sorted(int(x) for x in json.loads(row["intake_weekdays"] or "[]")),
-        "schedule_mode": row["schedule_mode"] or "weekly",
+        "schedule_mode": schedule_mode,
         "cycle_take_days": int(row["cycle_take_days"] or 0),
         "cycle_pause_days": int(row["cycle_pause_days"] or 0),
-        "cycle_start_date": row["cycle_start_date"] or None,
+        "cycle_start_date": cycle_start_date,
         "notes": (row["notes"] or "").strip(),
     }
 
@@ -514,6 +532,20 @@ def list_pause_periods(medication_id: int) -> list[PausePeriod]:
 
 def add_pause_period(medication_id: int, start_date: date, end_date: date, note: str) -> None:
     with closing(get_conn()) as conn:
+        overlap = conn.execute(
+            """
+            SELECT 1
+            FROM pause_periods
+            WHERE medication_id = ?
+              AND start_date <= ?
+              AND end_date >= ?
+            LIMIT 1
+            """,
+            (medication_id, end_date.isoformat(), start_date.isoformat()),
+        ).fetchone()
+        if overlap:
+            raise ValueError("Die Pause überschneidet sich mit einer bereits erfassten Pause.")
+
         conn.execute(
             """
             INSERT INTO pause_periods (medication_id, start_date, end_date, note)
@@ -592,7 +624,19 @@ def add_schedule_change(
     cycle_start_date: date | None,
 ) -> None:
     now_iso = datetime.now().isoformat(timespec="seconds")
+    if schedule_mode == "cycle":
+        cycle_start_date = cycle_start_date or start_date
+    else:
+        cycle_start_date = None
+
     with closing(get_conn()) as conn:
+        latest_change = conn.execute(
+            "SELECT start_date FROM schedule_changes WHERE medication_id = ? ORDER BY start_date DESC, id DESC LIMIT 1",
+            (medication_id,),
+        ).fetchone()
+        if latest_change and start_date <= parse_iso_date(latest_change["start_date"]):
+            raise ValueError("Rhythmuswechsel müssen nach dem zuletzt gespeicherten Wechsel liegen.")
+
         conn.execute(
             """
             INSERT INTO schedule_changes (
@@ -1278,6 +1322,24 @@ def validate_medication_payload(payload: dict) -> str | None:
     return None
 
 
+def validate_prescription_date_change(medication_id: int, new_prescription_issue_date: date) -> str | None:
+    movements = list_stock_movements(medication_id)
+    earlier_movements = [item for item in movements if item.movement_date < new_prescription_issue_date]
+    if earlier_movements:
+        return "Das Rezeptdatum kann nicht nach vorhandene Bestandsänderungen verschoben werden. Bitte zuerst die betroffenen Bestandsänderungen prüfen."
+    return None
+
+
+def validate_schedule_change_effective_date(medication_id: int, effective_date: date) -> str | None:
+    changes = list_schedule_changes(medication_id)
+    if not changes:
+        return None
+    latest_start_date = max(item.start_date for item in changes)
+    if effective_date <= latest_start_date:
+        return "Rhythmuswechsel müssen nach dem zuletzt gespeicherten Wechsel liegen."
+    return None
+
+
 def make_zip_bundle() -> None:
     with ZipFile(ZIP_PATH, "w", ZIP_DEFLATED) as zip_file:
         for filename in ["app.py", "README.md", "requirements.txt"]:
@@ -1730,7 +1792,7 @@ with tab3:
                 key="stock_note",
             )
 
-            if st.button("Bestandsänderung speichern", use_container_width=True):
+            if st.button("Bestandsänderung speichern", use_container_width=True, disabled=(quantity == 0)):
                 try:
                     add_stock_movement(stock_med_id, movement_date, quantity, stock_note)
                 except ValueError as exc:
@@ -1781,9 +1843,13 @@ with tab4:
             if pause_end < pause_start:
                 st.error("Das Enddatum darf nicht vor dem Startdatum liegen.")
             else:
-                add_pause_period(pause_med_id, pause_start, pause_end, pause_note)
-                st.session_state["flash_message"] = "Pause gespeichert."
-                st.rerun()
+                try:
+                    add_pause_period(pause_med_id, pause_start, pause_end, pause_note)
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.session_state["flash_message"] = "Pause gespeichert."
+                    st.rerun()
 
         existing_pauses = list_pause_periods(pause_med_id)
         if existing_pauses:
@@ -1902,7 +1968,7 @@ with tab5:
                 value=date.today(),
                 format="DD.MM.YYYY",
                 key=f"edit_schedule_effective_date_{edit_id}",
-                help="Nur relevant, wenn sich der Einnahmerhythmus ab einem bestimmten Datum ändert.",
+                help="Nur relevant, wenn sich der Einnahmerhythmus ändert. Standard ist heute; für rückwirkende Änderungen das Datum ausdrücklich anpassen.",
             )
 
             existing_schedule_changes = list_schedule_changes(edit_id)
@@ -1940,8 +2006,23 @@ with tab5:
                     "notes": notes,
                 }
                 validation_error = validate_medication_payload(payload)
+                current_prescription_issue_date = parse_iso_date(existing["prescription_issue_date"])
+                prescription_date_error = (
+                    validate_prescription_date_change(edit_id, prescription_issue_date)
+                    if prescription_issue_date > current_prescription_issue_date
+                    else None
+                )
+                schedule_date_error = (
+                    validate_schedule_change_effective_date(edit_id, schedule_effective_date)
+                    if old_schedule_payload != new_schedule_payload
+                    else None
+                )
                 if validation_error:
                     st.error(validation_error)
+                elif prescription_date_error:
+                    st.error(prescription_date_error)
+                elif schedule_date_error:
+                    st.error(schedule_date_error)
                 else:
                     simulated_schedule_changes = list_schedule_changes(edit_id)
                     if old_schedule_payload != new_schedule_payload:
@@ -1974,7 +2055,8 @@ with tab5:
                     else:
                         changed = save_medication(payload, medication_id=edit_id)
                         if old_schedule_payload != new_schedule_payload:
-                            add_schedule_change(
+                            try:
+                                add_schedule_change(
                                 medication_id=edit_id,
                                 start_date=schedule_effective_date,
                                 schedule_mode=new_schedule_payload["schedule_mode"],
@@ -1982,8 +2064,11 @@ with tab5:
                                 cycle_take_days=new_schedule_payload["cycle_take_days"],
                                 cycle_pause_days=new_schedule_payload["cycle_pause_days"],
                                 cycle_start_date=parse_iso_date(new_schedule_payload["cycle_start_date"]) if new_schedule_payload["cycle_start_date"] else None,
-                            )
-                            st.session_state["flash_message"] = "Eintrag und Rhythmusänderung gespeichert."
+                                )
+                            except ValueError as exc:
+                                st.error(str(exc))
+                            else:
+                                st.session_state["flash_message"] = "Eintrag und Rhythmusänderung gespeichert."
                         else:
                             st.session_state["flash_message"] = (
                                 "Eintrag gespeichert." if changed else "Keine Änderungen erkannt."
