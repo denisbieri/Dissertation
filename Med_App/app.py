@@ -104,28 +104,13 @@ def _migrate_legacy_incoming_stock(conn: sqlite3.Connection) -> None:
         return
 
     rows = conn.execute(
-        "SELECT id, tablets_at_home, incoming_tablets FROM medications WHERE COALESCE(incoming_tablets, 0) != 0"
+        "SELECT id, initial_tablets, incoming_tablets FROM medications WHERE COALESCE(incoming_tablets, 0) != 0"
     ).fetchall()
     for row in rows:
-        merged_stock = round(float(row["tablets_at_home"] or 0) + float(row["incoming_tablets"] or 0), 2)
+        merged_stock = round(float(row["initial_tablets"] or 0) + float(row["incoming_tablets"] or 0), 2)
         conn.execute(
-            "UPDATE medications SET tablets_at_home = ?, incoming_tablets = 0 WHERE id = ?",
+            "UPDATE medications SET initial_tablets = ?, incoming_tablets = 0 WHERE id = ?",
             (merged_stock, row["id"]),
-        )
-
-
-def _migrate_initial_stock(conn: sqlite3.Connection) -> None:
-    columns = {row["name"] for row in conn.execute("PRAGMA table_info(medications)").fetchall()}
-    if "initial_tablets" not in columns:
-        return
-
-    rows = conn.execute(
-        "SELECT id, initial_tablets, tablets_at_home FROM medications WHERE initial_tablets IS NULL OR initial_tablets = 0"
-    ).fetchall()
-    for row in rows:
-        conn.execute(
-            "UPDATE medications SET initial_tablets = ? WHERE id = ?",
-            (round(float(row["tablets_at_home"] or 0), 2), row["id"]),
         )
 
 
@@ -153,7 +138,7 @@ def init_db() -> None:
                 cycle_start_date TEXT,
                 notes TEXT NOT NULL DEFAULT '',
                 last_checked TEXT NOT NULL,
-                master_data_updated_at TEXT NOT NULL,
+                master_data_updated_at TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL
             )
             """
@@ -210,17 +195,32 @@ def init_db() -> None:
         _ensure_column(conn, "medications", "master_data_updated_at", "TEXT NOT NULL DEFAULT ''")
 
         _migrate_legacy_incoming_stock(conn)
-        _migrate_initial_stock(conn)
 
-        empty_master_rows = conn.execute(
-            "SELECT id, created_at, last_checked FROM medications WHERE COALESCE(master_data_updated_at, '') = ''"
+        rows = conn.execute(
+            "SELECT id, created_at, last_checked, tablets_at_home, initial_tablets FROM medications"
         ).fetchall()
-        for row in empty_master_rows:
-            fallback_value = row["last_checked"] or row["created_at"] or datetime.now().isoformat(timespec="seconds")
-            conn.execute(
-                "UPDATE medications SET master_data_updated_at = ? WHERE id = ?",
-                (fallback_value, row["id"]),
-            )
+        for row in rows:
+            if float(row["initial_tablets"] or 0) == 0 and float(row["tablets_at_home"] or 0) != 0:
+                conn.execute(
+                    "UPDATE medications SET initial_tablets = ? WHERE id = ?",
+                    (round(float(row["tablets_at_home"] or 0), 2), row["id"]),
+                )
+            needs_master = not str(row["last_checked"] or "").strip()
+            fallback = row["last_checked"] or row["created_at"] or datetime.now().isoformat(timespec="seconds")
+            current = conn.execute(
+                "SELECT master_data_updated_at FROM medications WHERE id = ?",
+                (row["id"],),
+            ).fetchone()
+            if current and not str(current["master_data_updated_at"] or "").strip():
+                conn.execute(
+                    "UPDATE medications SET master_data_updated_at = ? WHERE id = ?",
+                    (fallback, row["id"]),
+                )
+            elif needs_master:
+                conn.execute(
+                    "UPDATE medications SET last_checked = ?, master_data_updated_at = ? WHERE id = ?",
+                    (fallback, fallback, row["id"]),
+                )
 
         conn.commit()
 
@@ -228,7 +228,6 @@ def init_db() -> None:
 def ensure_initial_schedule_history() -> None:
     with closing(get_conn()) as conn:
         rows = conn.execute("SELECT * FROM medications").fetchall()
-
         for row in rows:
             existing = conn.execute(
                 "SELECT 1 FROM schedule_changes WHERE medication_id = ? LIMIT 1",
@@ -432,6 +431,65 @@ def delete_medication(medication_id: int) -> None:
         conn.commit()
 
 
+# ---------- Hilfsfunktionen ----------
+def parse_iso_date(value: str) -> date:
+    return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def parse_iso_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+def format_date_de(value: date | None) -> str:
+    if not value:
+        return "-"
+    return value.strftime("%d.%m.%Y")
+
+
+def format_datetime_de(value: str | None) -> str:
+    if not value:
+        return "-"
+    return parse_iso_datetime(value).strftime("%d.%m.%Y %H:%M")
+
+
+def clean_text(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def add_months(start: date, months: int) -> date:
+    return start + relativedelta(months=months)
+
+
+def weekdays_to_text(weekdays: list[int]) -> str:
+    weekdays = sorted(set(int(day) for day in weekdays))
+    if not weekdays:
+        return "-"
+    return ", ".join(WEEKDAY_LABELS[day] for day in weekdays)
+
+
+def cycle_to_text(take_days: int, pause_days: int, cycle_start_date: date | None) -> str:
+    if take_days <= 0:
+        return "-"
+    text = f"{take_days} Tage Einnahme / {pause_days} Tage Pause"
+    if cycle_start_date:
+        text += f" ab {format_date_de(cycle_start_date)}"
+    return text
+
+
+def schedule_to_text(
+    schedule_mode: str,
+    intake_weekdays: list[int],
+    cycle_take_days: int,
+    cycle_pause_days: int,
+    cycle_start_date: date | None,
+) -> str:
+    if schedule_mode == "cycle":
+        return cycle_to_text(cycle_take_days, cycle_pause_days, cycle_start_date)
+    return weekdays_to_text(intake_weekdays)
+
+
 def list_pause_periods(medication_id: int) -> list[PausePeriod]:
     with closing(get_conn()) as conn:
         rows = conn.execute(
@@ -524,13 +582,6 @@ def list_schedule_changes(medication_id: int) -> list[ScheduleChange]:
     ]
 
 
-def get_schedule_for_day(day: date, schedule_changes: list[ScheduleChange]) -> ScheduleChange | None:
-    valid_changes = [change for change in schedule_changes if change.start_date <= day]
-    if not valid_changes:
-        return None
-    return valid_changes[-1]
-
-
 def add_schedule_change(
     medication_id: int,
     start_date: date,
@@ -585,65 +636,6 @@ def add_schedule_change(
         conn.commit()
 
 
-# ---------- Hilfsfunktionen ----------
-def parse_iso_date(value: str) -> date:
-    return datetime.strptime(value, "%Y-%m-%d").date()
-
-
-def parse_iso_datetime(value: str) -> datetime:
-    return datetime.fromisoformat(value)
-
-
-def format_date_de(value: date | None) -> str:
-    if not value:
-        return "-"
-    return value.strftime("%d.%m.%Y")
-
-
-def format_datetime_de(value: str | None) -> str:
-    if not value:
-        return "-"
-    return parse_iso_datetime(value).strftime("%d.%m.%Y %H:%M")
-
-
-def clean_text(value: object) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def add_months(start: date, months: int) -> date:
-    return start + relativedelta(months=months)
-
-
-def weekdays_to_text(weekdays: list[int]) -> str:
-    weekdays = sorted(set(int(day) for day in weekdays))
-    if not weekdays:
-        return "-"
-    return ", ".join(WEEKDAY_LABELS[day] for day in weekdays)
-
-
-def cycle_to_text(take_days: int, pause_days: int, cycle_start_date: date | None) -> str:
-    if take_days <= 0:
-        return "-"
-    text = f"{take_days} Tage Einnahme / {pause_days} Tage Pause"
-    if cycle_start_date:
-        text += f" ab {format_date_de(cycle_start_date)}"
-    return text
-
-
-def schedule_to_text(
-    schedule_mode: str,
-    intake_weekdays: list[int],
-    cycle_take_days: int,
-    cycle_pause_days: int,
-    cycle_start_date: date | None,
-) -> str:
-    if schedule_mode == "cycle":
-        return cycle_to_text(cycle_take_days, cycle_pause_days, cycle_start_date)
-    return weekdays_to_text(intake_weekdays)
-
-
 def is_pause_day(day: date, pauses: list[PausePeriod]) -> bool:
     return any(pause.start_date <= day <= pause.end_date for pause in pauses)
 
@@ -674,6 +666,13 @@ def daterange(start_date: date, end_date: date):
     while current <= end_date:
         yield current
         current += timedelta(days=1)
+
+
+def get_schedule_for_day(day: date, schedule_changes: list[ScheduleChange]) -> ScheduleChange | None:
+    valid_changes = [change for change in schedule_changes if change.start_date <= day]
+    if not valid_changes:
+        return None
+    return valid_changes[-1]
 
 
 def daily_consumption_for_day(
@@ -717,15 +716,8 @@ def consumption_between(
     return round(total, 2)
 
 
-def movement_totals_by_day(movements: list[StockMovement]) -> dict[date, float]:
-    totals: dict[date, float] = defaultdict(float)
-    for movement in movements:
-        totals[movement.movement_date] += float(movement.quantity)
-    return {day: round(quantity, 2) for day, quantity in totals.items()}
-
-
 def calculate_stock_on_date(
-    row: sqlite3.Row,
+    row: sqlite3.Row | dict,
     target_date: date,
     pauses: list[PausePeriod] | None = None,
     schedule_changes: list[ScheduleChange] | None = None,
@@ -735,9 +727,10 @@ def calculate_stock_on_date(
     if target_date < prescription_issue_date:
         return round(float(row["initial_tablets"] or 0), 2)
 
-    pauses = pauses if pauses is not None else list_pause_periods(row["id"])
-    schedule_changes = schedule_changes if schedule_changes is not None else list_schedule_changes(row["id"])
-    movements = movements if movements is not None else list_stock_movements(row["id"])
+    medication_id = int(row["id"])
+    pauses = pauses if pauses is not None else list_pause_periods(medication_id)
+    schedule_changes = schedule_changes if schedule_changes is not None else list_schedule_changes(medication_id)
+    movements = movements if movements is not None else list_stock_movements(medication_id)
 
     movement_sum = sum(float(item.quantity) for item in movements if item.movement_date <= target_date)
     consumed = consumption_between(
@@ -749,6 +742,13 @@ def calculate_stock_on_date(
     )
     stock = float(row["initial_tablets"] or 0) + movement_sum - consumed
     return round(stock, 2)
+
+
+def movement_totals_by_day(movements: list[StockMovement]) -> dict[date, float]:
+    totals: dict[date, float] = defaultdict(float)
+    for movement in movements:
+        totals[movement.movement_date] += float(movement.quantity)
+    return {day: round(quantity, 2) for day, quantity in totals.items()}
 
 
 def build_stock_timeseries(
@@ -797,7 +797,7 @@ def build_stock_timeseries(
                 "Bestand": stock,
                 "Bestandsänderung": movement_delta,
                 "Verbrauch": consumption_delta,
-                "Pause": is_pause_day(day, pauses),
+                "Pause": "Ja" if is_pause_day(day, pauses) else "Nein",
                 "Rhythmus": schedule_text,
             }
         )
@@ -879,7 +879,8 @@ def build_stock_movement_history_df(row: sqlite3.Row) -> pd.DataFrame:
             "Erfasst am": format_datetime_de(row["created_at"]),
         }
     ]
-    for item in sorted(list_stock_movements(row["id"]), key=lambda x: (x.movement_date, x.id), reverse=True):
+    movements = sorted(list_stock_movements(row["id"]), key=lambda x: (x.movement_date, x.id), reverse=True)
+    for item in movements:
         history_rows.append(
             {
                 "Datum": format_date_de(item.movement_date),
@@ -916,24 +917,19 @@ def validate_stock_history_consistency(
     if prescription_issue_date is not None:
         effective_row["prescription_issue_date"] = prescription_issue_date.isoformat()
 
-    class _RowLike(dict):
-        def __getitem__(self, key):
-            return dict.get(self, key)
-
-    row_like = _RowLike(effective_row)
-    pauses = pauses if pauses is not None else list_pause_periods(row_like["id"])
-    schedule_changes = schedule_changes if schedule_changes is not None else list_schedule_changes(row_like["id"])
-    movements = movements if movements is not None else list_stock_movements(row_like["id"])
-
     stock_today = calculate_stock_on_date(
-        row=row_like,
+        row=effective_row,
         target_date=date.today(),
         pauses=pauses,
         schedule_changes=schedule_changes,
         movements=movements,
     )
     if stock_today < 0:
-        return False, "Die Historie würde zu einem negativen berechneten Bestand führen. Bitte Startbestand, Rhythmus, Pausen oder Bestandsänderungen prüfen.", stock_today
+        return (
+            False,
+            "Die Historie würde zu einem negativen berechneten Bestand führen. Bitte Startbestand, Rhythmus, Pausen oder Bestandsänderungen prüfen.",
+            stock_today,
+        )
     return True, None, stock_today
 
 
@@ -1214,7 +1210,11 @@ def render_schedule_inputs(prefix: str, existing: sqlite3.Row | None = None):
     cycle_start_date: date | None = None
 
     if schedule_mode == "weekly":
-        default_weekdays = sorted(int(x) for x in json.loads(existing["intake_weekdays"] or "[]")) if existing else list(WEEKDAY_LABELS.keys())
+        default_weekdays = (
+            sorted(int(x) for x in json.loads(existing["intake_weekdays"] or "[]"))
+            if existing
+            else list(WEEKDAY_LABELS.keys())
+        )
         intake_weekdays = st.multiselect(
             "An welchen Wochentagen wird das Medikament eingenommen?",
             options=list(WEEKDAY_LABELS.keys()),
@@ -1421,13 +1421,13 @@ summary_cols[1].metric(
     "Abgelaufene Rezepte",
     0 if overview_df.empty else int((overview_df["Rezeptstatus"] == "Abgelaufen").sum()),
 )
-summary_cols[3].metric(
-    "Bestände ≤ 14 Tage",
-    0 if overview_df.empty else int(overview_df["_rest_days_numeric"].fillna(999999).le(14).sum()),
-)
 summary_cols[2].metric(
     "Rezepte laufen bald ab (≤ 30 Tage)",
     0 if overview_df.empty else int((overview_df["Rezeptstatus"] == "Läuft bald ab").sum()),
+)
+summary_cols[3].metric(
+    "Bestände ≤ 14 Tage",
+    0 if overview_df.empty else int(overview_df["_rest_days_numeric"].fillna(999999).le(14).sum()),
 )
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
@@ -1472,8 +1472,8 @@ with tab1:
             "Rezeptdatum",
             "Gültig bis",
             "Rezeptstatus",
-            "Packungen Apotheke",
             "Datenstatus",
+            "Packungen Apotheke",
             "Startbestand",
             "Bestand aktuell",
             "Tabletten pro Einnahmetag",
@@ -1495,6 +1495,7 @@ with tab1:
         )
         selected_id = medication_options[selected_label]
         selected_row = get_medication(selected_id)
+
         if selected_row is not None:
             detail = calculate_row_metrics(selected_row)
             detail_col1, detail_col2 = st.columns(2)
@@ -1517,20 +1518,21 @@ with tab1:
                 st.markdown(f"**Zuletzt geändert:** {detail['latest_change_display']}")
                 st.markdown(f"**Stammdaten geändert:** {detail['master_data_updated_display']}")
 
-            movement_sum = round(sum(item.quantity for item in detail['movements']), 2)
+            movement_sum = round(sum(item.quantity for item in detail["movements"]), 2)
             st.markdown(f"**Verbrauch seit Rezeptdatum:** {detail['consumed_since_issue']}")
             st.markdown(f"**Summe Bestandsänderungen:** {movement_sum}")
-            st.markdown(f"**Rechnung:** {detail['initial_stock']} + {movement_sum} - {detail['consumed_since_issue']} = {detail['current_stock']}")
-            if detail['current_stock'] < 0:
-                st.error("Dieser Eintrag ist historisch inkonsistent. Bitte Startbestand, Rhythmus, Pausen und Bestandsänderungen prüfen.")
+            st.markdown(
+                f"**Rechnung:** {detail['initial_stock']} + {movement_sum} - {detail['consumed_since_issue']} = {detail['current_stock']}"
+            )
             st.markdown(f"**Bemerkungen:** {selected_row['notes'] or '-'}")
+
+            if detail["current_stock"] < 0:
+                st.error("Dieser Eintrag ist historisch inkonsistent. Bitte Startbestand, Rhythmus, Pausen und Bestandsänderungen prüfen.")
 
             movement_df = build_stock_movement_history_df(selected_row)
             if not movement_df.empty:
                 st.markdown("**Historie Bestand ändern / Zukauf:**")
                 st.dataframe(movement_df, use_container_width=True, hide_index=True)
-            else:
-                st.caption("Für diesen Eintrag gibt es noch keine Bestandshistorie.")
 
             schedule_history = detail["schedule_changes"]
             if schedule_history:
@@ -1552,8 +1554,6 @@ with tab1:
                 )
                 st.markdown("**Historie Einnahmerhythmus:**")
                 st.dataframe(schedule_df, use_container_width=True, hide_index=True)
-            else:
-                st.caption("Für diesen Eintrag gibt es noch keine Rhythmus-Historie.")
 
             if detail["pauses"]:
                 pause_df = pd.DataFrame(
@@ -1568,8 +1568,6 @@ with tab1:
                 )
                 st.markdown("**Erfasste Pausen / Ferien:**")
                 st.dataframe(pause_df, use_container_width=True, hide_index=True)
-            else:
-                st.caption("Für diesen Eintrag sind noch keine Pausen / Ferien erfasst.")
 
             st.markdown("**Berechneter Bestandsverlauf:**")
             render_stock_chart(selected_row)
@@ -1745,8 +1743,6 @@ with tab3:
             if not history_df.empty:
                 st.markdown("### Historie")
                 st.dataframe(history_df, use_container_width=True, hide_index=True)
-            else:
-                st.caption("Für dieses Medikament gibt es noch keine Bestandsänderungen.")
 
 with tab4:
     st.subheader("Pausen / Ferien verwalten")
@@ -1824,8 +1820,6 @@ with tab4:
                 delete_pause_period(pause_options[delete_pause_label], pause_med_id)
                 st.session_state["flash_message"] = "Pause gelöscht."
                 st.rerun()
-        else:
-            st.caption("Für dieses Medikament sind noch keine Pausen / Ferien erfasst.")
 
 with tab5:
     st.subheader("Bestehenden Eintrag bearbeiten")
@@ -1979,23 +1973,22 @@ with tab5:
                         st.error(error_message)
                     else:
                         changed = save_medication(payload, medication_id=edit_id)
-
                         if old_schedule_payload != new_schedule_payload:
                             add_schedule_change(
-                            medication_id=edit_id,
-                            start_date=schedule_effective_date,
-                            schedule_mode=new_schedule_payload["schedule_mode"],
-                            intake_weekdays=new_schedule_payload["intake_weekdays"],
-                            cycle_take_days=new_schedule_payload["cycle_take_days"],
-                            cycle_pause_days=new_schedule_payload["cycle_pause_days"],
-                            cycle_start_date=parse_iso_date(new_schedule_payload["cycle_start_date"]) if new_schedule_payload["cycle_start_date"] else None,
-                        )
-                        st.session_state["flash_message"] = "Eintrag und Rhythmusänderung gespeichert."
-                    else:
-                        st.session_state["flash_message"] = (
-                            "Eintrag gespeichert." if changed else "Keine Änderungen erkannt."
-                        )
-                    st.rerun()
+                                medication_id=edit_id,
+                                start_date=schedule_effective_date,
+                                schedule_mode=new_schedule_payload["schedule_mode"],
+                                intake_weekdays=new_schedule_payload["intake_weekdays"],
+                                cycle_take_days=new_schedule_payload["cycle_take_days"],
+                                cycle_pause_days=new_schedule_payload["cycle_pause_days"],
+                                cycle_start_date=parse_iso_date(new_schedule_payload["cycle_start_date"]) if new_schedule_payload["cycle_start_date"] else None,
+                            )
+                            st.session_state["flash_message"] = "Eintrag und Rhythmusänderung gespeichert."
+                        else:
+                            st.session_state["flash_message"] = (
+                                "Eintrag gespeichert." if changed else "Keine Änderungen erkannt."
+                            )
+                        st.rerun()
 
 with tab6:
     st.subheader("Export & Löschen")
@@ -2010,6 +2003,7 @@ with tab6:
                 "Rezeptdatum",
                 "Gültig bis",
                 "Rezeptstatus",
+                "Datenstatus",
                 "Packungen Apotheke",
                 "Startbestand",
                 "Bestand aktuell",
