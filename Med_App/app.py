@@ -51,6 +51,19 @@ class StockMovement:
     created_at: str
 
 
+@dataclass
+class ScheduleChange:
+    id: int
+    medication_id: int
+    start_date: date
+    schedule_mode: str
+    intake_weekdays: list[int]
+    cycle_take_days: int
+    cycle_pause_days: int
+    cycle_start_date: date | None
+    created_at: str
+
+
 # ---------- Datenbank ----------
 def get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -143,6 +156,22 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schedule_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                medication_id INTEGER NOT NULL,
+                start_date TEXT NOT NULL,
+                schedule_mode TEXT NOT NULL DEFAULT 'weekly',
+                intake_weekdays TEXT NOT NULL DEFAULT '[]',
+                cycle_take_days INTEGER NOT NULL DEFAULT 0,
+                cycle_pause_days INTEGER NOT NULL DEFAULT 0,
+                cycle_start_date TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (medication_id) REFERENCES medications (id) ON DELETE CASCADE
+            )
+            """
+        )
 
         _ensure_column(conn, "medications", "schedule_mode", "TEXT NOT NULL DEFAULT 'weekly'")
         _ensure_column(conn, "medications", "cycle_take_days", "INTEGER NOT NULL DEFAULT 0")
@@ -152,6 +181,44 @@ def init_db() -> None:
         _ensure_column(conn, "medications", "extra_pause_days", "INTEGER NOT NULL DEFAULT 0")
 
         _migrate_legacy_incoming_stock(conn)
+        conn.commit()
+
+
+def ensure_initial_schedule_history() -> None:
+    with closing(get_conn()) as conn:
+        rows = conn.execute("SELECT * FROM medications").fetchall()
+
+        for row in rows:
+            existing = conn.execute(
+                "SELECT 1 FROM schedule_changes WHERE medication_id = ? LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+            if existing:
+                continue
+
+            prescription_issue_date = row["prescription_issue_date"]
+            cycle_start_date = row["cycle_start_date"] or prescription_issue_date
+            now_iso = datetime.now().isoformat(timespec="seconds")
+
+            conn.execute(
+                """
+                INSERT INTO schedule_changes (
+                    medication_id, start_date, schedule_mode, intake_weekdays,
+                    cycle_take_days, cycle_pause_days, cycle_start_date, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["id"],
+                    prescription_issue_date,
+                    row["schedule_mode"] or "weekly",
+                    row["intake_weekdays"] or "[]",
+                    int(row["cycle_take_days"] or 0),
+                    int(row["cycle_pause_days"] or 0),
+                    cycle_start_date,
+                    now_iso,
+                ),
+            )
+
         conn.commit()
 
 
@@ -240,6 +307,25 @@ def save_medication(data: dict, medication_id: int | None = None) -> bool:
                     payload["cycle_start_date"],
                     payload["notes"],
                     now_iso,
+                    now_iso,
+                ),
+            )
+            new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.execute(
+                """
+                INSERT INTO schedule_changes (
+                    medication_id, start_date, schedule_mode, intake_weekdays,
+                    cycle_take_days, cycle_pause_days, cycle_start_date, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id,
+                    payload["prescription_issue_date"],
+                    payload["schedule_mode"],
+                    json.dumps(payload["intake_weekdays"]),
+                    payload["cycle_take_days"],
+                    payload["cycle_pause_days"],
+                    payload["cycle_start_date"] or payload["prescription_issue_date"],
                     now_iso,
                 ),
             )
@@ -400,6 +486,87 @@ def add_stock_movement(medication_id: int, movement_date: date, quantity: float,
         conn.commit()
 
 
+def list_schedule_changes(medication_id: int) -> list[ScheduleChange]:
+    with closing(get_conn()) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM schedule_changes
+            WHERE medication_id = ?
+            ORDER BY start_date ASC, id ASC
+            """,
+            (medication_id,),
+        ).fetchall()
+
+    return [
+        ScheduleChange(
+            id=row["id"],
+            medication_id=row["medication_id"],
+            start_date=parse_iso_date(row["start_date"]),
+            schedule_mode=row["schedule_mode"],
+            intake_weekdays=sorted(int(x) for x in json.loads(row["intake_weekdays"] or "[]")),
+            cycle_take_days=int(row["cycle_take_days"] or 0),
+            cycle_pause_days=int(row["cycle_pause_days"] or 0),
+            cycle_start_date=parse_iso_date(row["cycle_start_date"]) if row["cycle_start_date"] else None,
+            created_at=row["created_at"],
+        )
+        for row in rows
+    ]
+
+
+def add_schedule_change(
+    medication_id: int,
+    start_date: date,
+    schedule_mode: str,
+    intake_weekdays: list[int],
+    cycle_take_days: int,
+    cycle_pause_days: int,
+    cycle_start_date: date | None,
+) -> None:
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    with closing(get_conn()) as conn:
+        conn.execute(
+            """
+            INSERT INTO schedule_changes (
+                medication_id, start_date, schedule_mode, intake_weekdays,
+                cycle_take_days, cycle_pause_days, cycle_start_date, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                medication_id,
+                start_date.isoformat(),
+                schedule_mode,
+                json.dumps(sorted(int(x) for x in intake_weekdays)),
+                int(cycle_take_days),
+                int(cycle_pause_days),
+                cycle_start_date.isoformat() if cycle_start_date else None,
+                now_iso,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE medications
+            SET schedule_mode = ?,
+                intake_weekdays = ?,
+                cycle_take_days = ?,
+                cycle_pause_days = ?,
+                cycle_start_date = ?,
+                last_checked = ?
+            WHERE id = ?
+            """,
+            (
+                schedule_mode,
+                json.dumps(sorted(int(x) for x in intake_weekdays)),
+                int(cycle_take_days),
+                int(cycle_pause_days),
+                cycle_start_date.isoformat() if cycle_start_date else None,
+                now_iso,
+                medication_id,
+            ),
+        )
+        conn.commit()
+
+
 # ---------- Hilfsfunktionen ----------
 def parse_iso_date(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
@@ -491,16 +658,19 @@ def daterange(start_date: date, end_date: date):
         current += timedelta(days=1)
 
 
+def get_schedule_for_day(day: date, schedule_changes: list[ScheduleChange]) -> ScheduleChange | None:
+    valid_changes = [change for change in schedule_changes if change.start_date <= day]
+    if not valid_changes:
+        return None
+    return valid_changes[-1]
+
+
 def consumption_between(
     start_date: date,
     end_date: date,
     tablets_per_day: float,
-    schedule_mode: str,
-    intake_weekdays: list[int],
-    cycle_take_days: int,
-    cycle_pause_days: int,
-    cycle_start_date: date | None,
     pauses: list[PausePeriod],
+    schedule_changes: list[ScheduleChange],
 ) -> float:
     if end_date < start_date:
         return 0.0
@@ -509,13 +679,18 @@ def consumption_between(
     for day in daterange(start_date, end_date):
         if is_pause_day(day, pauses):
             continue
+
+        schedule = get_schedule_for_day(day, schedule_changes)
+        if schedule is None:
+            continue
+
         if is_scheduled_intake_day(
             day,
-            schedule_mode,
-            intake_weekdays,
-            cycle_take_days,
-            cycle_pause_days,
-            cycle_start_date,
+            schedule.schedule_mode,
+            schedule.intake_weekdays,
+            schedule.cycle_take_days,
+            schedule.cycle_pause_days,
+            schedule.cycle_start_date,
         ):
             total += float(tablets_per_day)
     return round(total, 2)
@@ -524,12 +699,8 @@ def consumption_between(
 def projected_until_date(
     available_stock: float,
     tablets_per_day: float,
-    schedule_mode: str,
-    intake_weekdays: list[int],
-    cycle_take_days: int,
-    cycle_pause_days: int,
-    cycle_start_date: date | None,
     pauses: list[PausePeriod],
+    schedule_changes: list[ScheduleChange],
     start_date: date,
     max_years: int = 10,
 ) -> date | None:
@@ -537,10 +708,6 @@ def projected_until_date(
     if available_stock <= 0:
         return None
     if tablets_per_day <= 0:
-        return None
-    if schedule_mode == "weekly" and not intake_weekdays:
-        return None
-    if schedule_mode == "cycle" and cycle_take_days <= 0:
         return None
 
     remaining = available_stock
@@ -554,13 +721,19 @@ def projected_until_date(
             current += timedelta(days=1)
             continue
 
+        schedule = get_schedule_for_day(current, schedule_changes)
+        if schedule is None:
+            last_covered_day = current
+            current += timedelta(days=1)
+            continue
+
         if not is_scheduled_intake_day(
             current,
-            schedule_mode,
-            intake_weekdays,
-            cycle_take_days,
-            cycle_pause_days,
-            cycle_start_date,
+            schedule.schedule_mode,
+            schedule.intake_weekdays,
+            schedule.cycle_take_days,
+            schedule.cycle_pause_days,
+            schedule.cycle_start_date,
         ):
             last_covered_day = current
             current += timedelta(days=1)
@@ -612,38 +785,48 @@ def covered_until_display(current_stock: float, covered_until: date | None) -> s
 def calculate_row_metrics(row: sqlite3.Row, today: date | None = None) -> dict:
     today = today or date.today()
     pauses = list_pause_periods(row["id"])
+    schedule_changes = list_schedule_changes(row["id"])
     prescription_issue_date = parse_iso_date(row["prescription_issue_date"])
     valid_until = add_months(prescription_issue_date, int(row["validity_months"] or 0))
-    intake_weekdays = sorted(int(x) for x in json.loads(row["intake_weekdays"] or "[]"))
-    schedule_mode = row["schedule_mode"] or "weekly"
-    cycle_take_days = int(row["cycle_take_days"] or 0)
-    cycle_pause_days = int(row["cycle_pause_days"] or 0)
-    cycle_start_date = parse_iso_date(row["cycle_start_date"]) if row["cycle_start_date"] else prescription_issue_date
     current_stock = round(float(row["tablets_at_home"] or 0), 2)
 
     consumed_since_issue = consumption_between(
         start_date=prescription_issue_date,
         end_date=today,
         tablets_per_day=float(row["tablets_per_day"] or 0),
-        schedule_mode=schedule_mode,
-        intake_weekdays=intake_weekdays,
-        cycle_take_days=cycle_take_days,
-        cycle_pause_days=cycle_pause_days,
-        cycle_start_date=cycle_start_date,
         pauses=pauses,
+        schedule_changes=schedule_changes,
     )
     covered_until = projected_until_date(
         available_stock=current_stock,
         tablets_per_day=float(row["tablets_per_day"] or 0),
-        schedule_mode=schedule_mode,
-        intake_weekdays=intake_weekdays,
-        cycle_take_days=cycle_take_days,
-        cycle_pause_days=cycle_pause_days,
-        cycle_start_date=cycle_start_date,
         pauses=pauses,
+        schedule_changes=schedule_changes,
         start_date=today,
     )
     rest_days = rest_days_from_covered_until(covered_until, today)
+    current_schedule = get_schedule_for_day(today, schedule_changes)
+
+    if current_schedule:
+        intake_weekdays = current_schedule.intake_weekdays
+        schedule_mode = current_schedule.schedule_mode
+        cycle_take_days = current_schedule.cycle_take_days
+        cycle_pause_days = current_schedule.cycle_pause_days
+        cycle_start_date = current_schedule.cycle_start_date
+        schedule_display = schedule_to_text(
+            schedule_mode,
+            intake_weekdays,
+            cycle_take_days,
+            cycle_pause_days,
+            cycle_start_date,
+        )
+    else:
+        intake_weekdays = []
+        schedule_mode = "weekly"
+        cycle_take_days = 0
+        cycle_pause_days = 0
+        cycle_start_date = None
+        schedule_display = "-"
 
     return {
         "prescription_issue_date": prescription_issue_date,
@@ -660,15 +843,10 @@ def calculate_row_metrics(row: sqlite3.Row, today: date | None = None) -> dict:
         "rest_days": rest_days,
         "rest_days_display": remaining_days_display(current_stock, rest_days),
         "covered_until_display": covered_until_display(current_stock, covered_until),
-        "schedule_display": schedule_to_text(
-            schedule_mode,
-            intake_weekdays,
-            cycle_take_days,
-            cycle_pause_days,
-            cycle_start_date,
-        ),
+        "schedule_display": schedule_display,
         "pause_count": len(pauses),
         "pauses": pauses,
+        "schedule_changes": schedule_changes,
     }
 
 
@@ -869,12 +1047,11 @@ def make_zip_bundle() -> None:
 # ---------- UI ----------
 st.set_page_config(page_title="Medikamentenbestand", page_icon="💊", layout="wide")
 init_db()
+ensure_initial_schedule_history()
 make_zip_bundle()
 
 st.title("💊 Medikamentenbestand & Rezeptübersicht")
-st.caption(
-    "Streamlit-App zur Medikamentenverwaltung mit Bestands- und Rezeptübersicht."
-)
+st.caption("Streamlit-App zur Medikamentenverwaltung mit Bestands- und Rezeptübersicht.")
 
 flash_message = st.session_state.pop("flash_message", None)
 if flash_message:
@@ -892,6 +1069,7 @@ with st.sidebar:
 - **Reicht voraussichtlich bis** zeigt das Datum, bis zu dem der aktuelle Bestand noch ausreicht. Die Berechnung startet ab **heute**.
 - **Ferien / Pausen** können pro Medikament separat erfasst werden und fliessen in die Berechnung ein.
 - Das **Zyklus-Modell** eignet sich für regelmässige Einnahmerhythmen, z. B. **5 Tage Einnahme / 2 Tage Pause**.
+- Ein **Rhythmuswechsel** kann bei der Bearbeitung ab einem gewünschten Datum gespeichert werden und wird historisch berücksichtigt.
 - Im Tab **Bestand / Zukauf** können **Zugänge**, aber auch **Korrekturen oder Verluste** erfasst werden.
 - Die **Bestandswarnung** zeigt nur Medikamente mit **weniger als 14 verbleibenden Tagen**.
 - **Zuletzt geprüft** wird nur dann aktualisiert, wenn am jeweiligen Eintrag tatsächlich etwas geändert wurde.
@@ -901,8 +1079,8 @@ with st.sidebar:
 rows = list_medications()
 overview_df = build_overview_df(rows)
 medication_options = get_medication_options(rows)
-existing_person_names = unique_field_values(rows, 'person_name')
-existing_medication_names = unique_field_values(rows, 'medication_name')
+existing_person_names = unique_field_values(rows, "person_name")
+existing_medication_names = unique_field_values(rows, "medication_name")
 low_stock_df = build_low_stock_df(overview_df)
 
 summary_cols = st.columns(4)
@@ -1021,6 +1199,29 @@ with tab1:
                 st.dataframe(movement_df, use_container_width=True, hide_index=True)
             else:
                 st.caption("Für diesen Eintrag gibt es noch keine Bestandsänderungen.")
+
+            schedule_history = detail["schedule_changes"]
+            if schedule_history:
+                schedule_df = pd.DataFrame(
+                    [
+                        {
+                            "Gültig ab": format_date_de(item.start_date),
+                            "Rhythmus": schedule_to_text(
+                                item.schedule_mode,
+                                item.intake_weekdays,
+                                item.cycle_take_days,
+                                item.cycle_pause_days,
+                                item.cycle_start_date,
+                            ),
+                            "Erfasst am": format_datetime_de(item.created_at),
+                        }
+                        for item in schedule_history
+                    ]
+                )
+                st.markdown("**Historie Einnahmerhythmus:**")
+                st.dataframe(schedule_df, use_container_width=True, hide_index=True)
+            else:
+                st.caption("Für diesen Eintrag gibt es noch keine Rhythmus-Historie.")
 
             if detail["pauses"]:
                 pause_df = pd.DataFrame(
@@ -1342,6 +1543,30 @@ with tab5:
                 )
 
             edit_schedule = render_schedule_inputs(prefix=f"edit_{edit_id}", existing=existing)
+            schedule_effective_date = st.date_input(
+                "Rhythmusänderung gültig ab",
+                value=date.today(),
+                format="DD.MM.YYYY",
+                key=f"edit_schedule_effective_date_{edit_id}",
+                help="Nur relevant, wenn sich der Einnahmerhythmus ab einem bestimmten Datum ändert.",
+            )
+
+            existing_schedule_changes = list_schedule_changes(edit_id)
+            latest_schedule = existing_schedule_changes[-1] if existing_schedule_changes else None
+            old_schedule_payload = {
+                "schedule_mode": latest_schedule.schedule_mode if latest_schedule else (existing["schedule_mode"] or "weekly"),
+                "intake_weekdays": latest_schedule.intake_weekdays if latest_schedule else sorted(int(x) for x in json.loads(existing["intake_weekdays"] or "[]")),
+                "cycle_take_days": latest_schedule.cycle_take_days if latest_schedule else int(existing["cycle_take_days"] or 0),
+                "cycle_pause_days": latest_schedule.cycle_pause_days if latest_schedule else int(existing["cycle_pause_days"] or 0),
+                "cycle_start_date": latest_schedule.cycle_start_date.isoformat() if latest_schedule and latest_schedule.cycle_start_date else (existing["cycle_start_date"] or None),
+            }
+            new_schedule_payload = {
+                "schedule_mode": edit_schedule["schedule_mode"],
+                "intake_weekdays": edit_schedule["intake_weekdays"],
+                "cycle_take_days": edit_schedule["cycle_take_days"],
+                "cycle_pause_days": edit_schedule["cycle_pause_days"],
+                "cycle_start_date": edit_schedule["cycle_start_date"],
+            }
 
             if st.button("Änderungen speichern", use_container_width=True):
                 payload = {
@@ -1365,9 +1590,22 @@ with tab5:
                     st.error(validation_error)
                 else:
                     changed = save_medication(payload, medication_id=edit_id)
-                    st.session_state["flash_message"] = (
-                        "Eintrag gespeichert." if changed else "Keine Änderungen erkannt."
-                    )
+
+                    if old_schedule_payload != new_schedule_payload:
+                        add_schedule_change(
+                            medication_id=edit_id,
+                            start_date=schedule_effective_date,
+                            schedule_mode=new_schedule_payload["schedule_mode"],
+                            intake_weekdays=new_schedule_payload["intake_weekdays"],
+                            cycle_take_days=new_schedule_payload["cycle_take_days"],
+                            cycle_pause_days=new_schedule_payload["cycle_pause_days"],
+                            cycle_start_date=parse_iso_date(new_schedule_payload["cycle_start_date"]) if new_schedule_payload["cycle_start_date"] else None,
+                        )
+                        st.session_state["flash_message"] = "Eintrag und Rhythmusänderung gespeichert."
+                    else:
+                        st.session_state["flash_message"] = (
+                            "Eintrag gespeichert." if changed else "Keine Änderungen erkannt."
+                        )
                     st.rerun()
 
 with tab6:
