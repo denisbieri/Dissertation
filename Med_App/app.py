@@ -895,6 +895,48 @@ def latest_change_display(row: sqlite3.Row) -> str:
     return format_datetime_de(row["last_checked"])
 
 
+def data_quality_status(current_stock: float) -> str:
+    return "Daten prüfen" if current_stock < 0 else "OK"
+
+
+def validate_stock_history_consistency(
+    row: sqlite3.Row | dict,
+    initial_tablets: float | None = None,
+    tablets_per_day: float | None = None,
+    prescription_issue_date: date | None = None,
+    schedule_changes: list[ScheduleChange] | None = None,
+    pauses: list[PausePeriod] | None = None,
+    movements: list[StockMovement] | None = None,
+) -> tuple[bool, str | None, float]:
+    effective_row = dict(row)
+    if initial_tablets is not None:
+        effective_row["initial_tablets"] = round(float(initial_tablets), 2)
+    if tablets_per_day is not None:
+        effective_row["tablets_per_day"] = round(float(tablets_per_day), 2)
+    if prescription_issue_date is not None:
+        effective_row["prescription_issue_date"] = prescription_issue_date.isoformat()
+
+    class _RowLike(dict):
+        def __getitem__(self, key):
+            return dict.get(self, key)
+
+    row_like = _RowLike(effective_row)
+    pauses = pauses if pauses is not None else list_pause_periods(row_like["id"])
+    schedule_changes = schedule_changes if schedule_changes is not None else list_schedule_changes(row_like["id"])
+    movements = movements if movements is not None else list_stock_movements(row_like["id"])
+
+    stock_today = calculate_stock_on_date(
+        row=row_like,
+        target_date=date.today(),
+        pauses=pauses,
+        schedule_changes=schedule_changes,
+        movements=movements,
+    )
+    if stock_today < 0:
+        return False, "Die Historie würde zu einem negativen berechneten Bestand führen. Bitte Startbestand, Rhythmus, Pausen oder Bestandsänderungen prüfen.", stock_today
+    return True, None, stock_today
+
+
 def projected_until_date(
     available_stock: float,
     tablets_per_day: float,
@@ -1021,6 +1063,7 @@ def calculate_row_metrics(row: sqlite3.Row, today: date | None = None) -> dict:
         "prescription_issue_date": prescription_issue_date,
         "valid_until": valid_until,
         "prescription_status": status_for_prescription(valid_until, today),
+        "data_quality_status": data_quality_status(current_stock),
         "intake_weekdays": intake_weekdays,
         "schedule_mode": schedule_mode,
         "cycle_take_days": cycle_take_days,
@@ -1058,6 +1101,7 @@ def build_overview_df(rows: list[sqlite3.Row]) -> pd.DataFrame:
                 "Rezeptdatum": format_date_de(metrics["prescription_issue_date"]),
                 "Gültig bis": format_date_de(metrics["valid_until"]),
                 "Rezeptstatus": metrics["prescription_status"],
+                "Datenstatus": metrics["data_quality_status"],
                 "Packungen Apotheke": int(row["pharmacy_reserved_packs"] or 0),
                 "Startbestand": metrics["initial_stock"],
                 "Bestand aktuell": metrics["current_stock"],
@@ -1101,6 +1145,7 @@ def build_low_stock_df(overview_df: pd.DataFrame, limit: int = 10) -> pd.DataFra
         [
             "Name",
             "Medikament",
+            "Datenstatus",
             "Bestand aktuell",
             "Tage verbleibend",
             "Reicht voraussichtlich bis",
@@ -1350,6 +1395,7 @@ with st.sidebar:
     st.markdown(
         """
 - **Bestand aktuell** wird automatisch aus **Startbestand - Verbrauch + Bestandsänderungen** berechnet.
+- Neue und geänderte Einträge werden auf **negative berechnete Bestände** geprüft und bei Bedarf blockiert.
 - **Startbestand** ist der Bestand **zum Rezeptdatum**.
 - **In der Apotheke hinterlegte Packungen** werden separat erfasst und **nicht** in den aktuellen Bestand eingerechnet.
 - **Reicht voraussichtlich bis** zeigt das Datum, bis zu dem der berechnete Bestand noch ausreicht.
@@ -1427,6 +1473,7 @@ with tab1:
             "Gültig bis",
             "Rezeptstatus",
             "Packungen Apotheke",
+            "Datenstatus",
             "Startbestand",
             "Bestand aktuell",
             "Tabletten pro Einnahmetag",
@@ -1458,6 +1505,7 @@ with tab1:
                 st.markdown(f"**Rezeptdatum:** {format_date_de(detail['prescription_issue_date'])}")
                 st.markdown(f"**Gültig bis:** {format_date_de(detail['valid_until'])}")
                 st.markdown(f"**Rezeptstatus:** {detail['prescription_status']}")
+                st.markdown(f"**Datenstatus:** {detail['data_quality_status']}")
                 st.markdown(f"**Startbestand:** {detail['initial_stock']}")
             with detail_col2:
                 st.markdown(f"**Bestand aktuell:** {detail['current_stock']}")
@@ -1469,7 +1517,12 @@ with tab1:
                 st.markdown(f"**Zuletzt geändert:** {detail['latest_change_display']}")
                 st.markdown(f"**Stammdaten geändert:** {detail['master_data_updated_display']}")
 
+            movement_sum = round(sum(item.quantity for item in detail['movements']), 2)
             st.markdown(f"**Verbrauch seit Rezeptdatum:** {detail['consumed_since_issue']}")
+            st.markdown(f"**Summe Bestandsänderungen:** {movement_sum}")
+            st.markdown(f"**Rechnung:** {detail['initial_stock']} + {movement_sum} - {detail['consumed_since_issue']} = {detail['current_stock']}")
+            if detail['current_stock'] < 0:
+                st.error("Dieser Eintrag ist historisch inkonsistent. Bitte Startbestand, Rhythmus, Pausen und Bestandsänderungen prüfen.")
             st.markdown(f"**Bemerkungen:** {selected_row['notes'] or '-'}")
 
             movement_df = build_stock_movement_history_df(selected_row)
@@ -1612,9 +1665,37 @@ with tab2:
         if validation_error:
             st.error(validation_error)
         else:
-            save_medication(payload)
-            st.session_state["flash_message"] = "Eintrag gespeichert."
-            st.rerun()
+            temp_row = {
+                "id": -1,
+                "prescription_issue_date": payload["prescription_issue_date"],
+                "initial_tablets": payload["initial_tablets"],
+                "tablets_per_day": payload["tablets_per_day"],
+            }
+            initial_schedule_changes = [
+                ScheduleChange(
+                    id=-1,
+                    medication_id=-1,
+                    start_date=parse_iso_date(payload["prescription_issue_date"]),
+                    schedule_mode=payload["schedule_mode"],
+                    intake_weekdays=payload["intake_weekdays"],
+                    cycle_take_days=payload["cycle_take_days"],
+                    cycle_pause_days=payload["cycle_pause_days"],
+                    cycle_start_date=parse_iso_date(payload["cycle_start_date"]) if payload["cycle_start_date"] else parse_iso_date(payload["prescription_issue_date"]),
+                    created_at=datetime.now().isoformat(timespec="seconds"),
+                )
+            ]
+            is_valid, error_message, _ = validate_stock_history_consistency(
+                row=temp_row,
+                schedule_changes=initial_schedule_changes,
+                pauses=[],
+                movements=[],
+            )
+            if not is_valid:
+                st.error(error_message)
+            else:
+                save_medication(payload)
+                st.session_state["flash_message"] = "Eintrag gespeichert."
+                st.rerun()
 
 with tab3:
     st.subheader("Bestand ändern / Zukauf buchen")
@@ -1868,10 +1949,39 @@ with tab5:
                 if validation_error:
                     st.error(validation_error)
                 else:
-                    changed = save_medication(payload, medication_id=edit_id)
-
+                    simulated_schedule_changes = list_schedule_changes(edit_id)
                     if old_schedule_payload != new_schedule_payload:
-                        add_schedule_change(
+                        simulated_schedule_changes = simulated_schedule_changes + [
+                            ScheduleChange(
+                                id=-1,
+                                medication_id=edit_id,
+                                start_date=schedule_effective_date,
+                                schedule_mode=new_schedule_payload["schedule_mode"],
+                                intake_weekdays=new_schedule_payload["intake_weekdays"],
+                                cycle_take_days=new_schedule_payload["cycle_take_days"],
+                                cycle_pause_days=new_schedule_payload["cycle_pause_days"],
+                                cycle_start_date=parse_iso_date(new_schedule_payload["cycle_start_date"]) if new_schedule_payload["cycle_start_date"] else None,
+                                created_at=datetime.now().isoformat(timespec="seconds"),
+                            )
+                        ]
+                        simulated_schedule_changes = sorted(simulated_schedule_changes, key=lambda x: (x.start_date, x.id))
+
+                    is_valid, error_message, _ = validate_stock_history_consistency(
+                        row=existing,
+                        initial_tablets=payload["initial_tablets"],
+                        tablets_per_day=payload["tablets_per_day"],
+                        prescription_issue_date=prescription_issue_date,
+                        schedule_changes=simulated_schedule_changes,
+                        pauses=list_pause_periods(edit_id),
+                        movements=list_stock_movements(edit_id),
+                    )
+                    if not is_valid:
+                        st.error(error_message)
+                    else:
+                        changed = save_medication(payload, medication_id=edit_id)
+
+                        if old_schedule_payload != new_schedule_payload:
+                            add_schedule_change(
                             medication_id=edit_id,
                             start_date=schedule_effective_date,
                             schedule_mode=new_schedule_payload["schedule_mode"],
