@@ -873,7 +873,7 @@ make_zip_bundle()
 
 st.title("💊 Medikamentenbestand & Rezeptübersicht")
 st.caption(
-    "Lokale Streamlit-App mit SQLite. Apotheke-Reserve bleibt separat, Bestandsänderungen können positiv oder negativ gebucht werden."
+    "Streamlit-App zur Medikamentenverwaltung mit Bestands- und Rezeptübersicht."
 )
 
 flash_message = st.session_state.pop("flash_message", None)
